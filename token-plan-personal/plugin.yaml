@@ -1,0 +1,5 @@
+name: token-plan-personal
+kind: model-provider
+version: 1.1.0
+description: Alibaba Token Plan (Personal Edition) — Anthropic-compatible inference + live catalog via the OpenAI-compatible endpoint
+author: fabzter
