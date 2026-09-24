@@ -13,11 +13,11 @@ profile, and user plugins win on name collision (last-writer-wins in `register_p
 
 ---
 
-## ⚠️ Read this before installing
+## ⚠️ Two Hermes quirks you must work around
 
-**`hermes plugins install` alone will NOT work for model providers.**
+### 1. `hermes plugins install` clones to the wrong place for model providers
 
-The installer always clones to a **top-level** path:
+The installer always lands a plugin **top-level**:
 
 ```
 ~/.hermes/plugins/<name>/          ← where `hermes plugins install` puts things
@@ -30,49 +30,75 @@ But model-provider discovery only scans **two** locations (`providers/__init__.p
 2. $HERMES_HOME/plugins/model-providers/<name>/      ← user
 ```
 
-A plugin that lands top-level is **explicitly skipped** by the flat plugin scanner
-(`Skipping '<name>' (model-provider, handled by providers/ discovery)`) — and then the
-provider discovery never looks where it was installed. Net result: it silently does nothing.
+A plugin that lands top-level is **explicitly skipped** by the flat scanner
+(`Skipping '<name>' (model-provider, handled by providers/ discovery)`), and the provider
+discovery never looks there. Net result: it silently does nothing.
+
+→ **Fix: symlink into `model-providers/`.** Discovery uses `Path.is_dir()`, which follows
+symlinks, so a symlink is indistinguishable from a real directory here.
+
+### 2. Installing a SUBDIRECTORY loses `.git`, so `update` breaks
+
+`_install_plugin_core()` clones to a temp dir, then does `shutil.move()` on the target:
+
+```python
+if subdir:
+    tmp_target = _resolve_subdir_within(tmp_clone, subdir)   # only the subdir
+else:
+    tmp_target = tmp_clone                                   # the whole clone
+shutil.move(str(tmp_target), str(target))
+```
+
+Install a subdir (`owner/repo/plugin`) and **only that subdir is moved** — `.git` stays behind
+in the temp dir and is deleted. `hermes plugins update` then fails permanently:
+
+```
+Error: Plugin 'x' was not installed from git (no .git directory). Cannot update.
+```
+
+→ **Fix: install the WHOLE repo**, then point the symlinks at subdirectories *inside* the
+clone. The clone keeps `.git`, so `update` works, and one update refreshes every plugin in the
+repo at once.
 
 ## Install
 
 ```bash
-# 1. Install from GitHub (lands top-level — expected)
-hermes plugins install fabzter/hermes-model-providers/token-plan-personal
-hermes plugins install fabzter/hermes-model-providers/openai-codex
+# 1. Install the WHOLE repo (keeps .git → updates work)
+hermes plugins install fabzter/hermes-model-providers --no-enable
 
-# 2. Bridge the path mismatch with a symlink
-#    (discovery uses Path.is_dir(), which follows symlinks — so this works)
-ln -s ~/.hermes/plugins/token-plan-personal \
+# 2. Symlink each plugin into the directory discovery actually scans
+ln -s ~/.hermes/plugins/hermes-model-providers/token-plan-personal \
       ~/.hermes/plugins/model-providers/token-plan-personal
-ln -s ~/.hermes/plugins/openai-codex \
+ln -s ~/.hermes/plugins/hermes-model-providers/openai-codex \
       ~/.hermes/plugins/model-providers/openai-codex
 ```
 
-Verify:
+Verify the symlinks resolve:
 
 ```bash
 ls -la ~/.hermes/plugins/model-providers/
 ```
 
-You should see the symlinks alongside any real directories. Restart Hermes (plugin changes do
-not reload in a running process), then check the picker with `/model`.
+Then **restart Hermes** — plugin changes do not reload in a running process.
 
 ## Update
 
 ```bash
-hermes plugins update token-plan-personal
-hermes plugins update openai-codex
+hermes plugins update hermes-model-providers
 ```
 
-The symlink follows the clone, so no extra step is needed after an update.
+One command updates both providers: `git pull` on the clone, and the symlinks follow
+automatically.
 
-## Why the symlink instead of just copying
+## Verify the whole path works
 
-Copying works but loses the point: every upstream refresh means re-copying by hand, and a
-Hermes upgrade that touches `~/.hermes/plugins/` can overwrite a hand-placed directory with no
-trace. Cloning + symlinking keeps **GitHub as the single source of truth** while satisfying the
-discovery path.
+```bash
+# must print a commit hash — if it says "not a git repository", you installed a subdir
+git -C ~/.hermes/plugins/hermes-model-providers log --oneline -1
+
+# must show the plugin version through the symlink
+grep ^version ~/.hermes/plugins/model-providers/token-plan-personal/plugin.yaml
+```
 
 ---
 
@@ -90,7 +116,7 @@ Alibaba Cloud Model Studio — Token Plan (Personal Edition). Dedicated API key 
 The Anthropic-compatible inference path **does not expose a model catalog** — requesting
 `/apps/anthropic/v1/models` returns **HTTP 404**. Because `models_url` was unset, Hermes built
 the probe URL as `{base_url}/models`, hit the 404, and the live fetch failed silently. The
-picker then fell back to the plugin's static `fallback_models` — a hand-maintained list — and
+picker then fell back to the plugin's static `fallback_models` — a hand-maintained list — so
 newly released models never appeared.
 
 Concretely: `glm-5.3` was live on the endpoint while the picker showed `glm-5.2`.
@@ -105,9 +131,11 @@ models_url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/
 It lists **text-generation models only** — image / audio / video IDs are deliberately kept out
 of the chat picker.
 
-> `hermes model --refresh` / `/model --refresh` cannot fix this class of problem. Those commands
-> bust the *cache*, but the cache was never the issue — the fetch itself could not succeed, so
-> there was nothing fresh to cache.
+> **`hermes model --refresh` / `/model --refresh` cannot fix this class of problem.** Those
+> commands bust the *cache*, but the cache was never the issue — the fetch itself could not
+> succeed, so there was nothing fresh to cache. Symptom to recognize: *"I refreshed and the
+> list is still old."* Check whether the provider's catalog endpoint actually responds before
+> blaming the cache.
 
 ### Known limitation
 
@@ -130,9 +158,14 @@ OAuth-external provider.
 
 ## Contributing / upstream
 
-The install-path mismatch described above looks like an **upstream gap**: `hermes plugins
-install` does not honor a plugin's declared `kind: model-provider` when choosing a destination.
-If that is fixed, the symlink step in the install instructions becomes unnecessary.
+Both quirks above look like **upstream gaps** worth reporting:
+
+1. `hermes plugins install` does not honor a plugin's declared `kind: model-provider` when
+   choosing a destination.
+2. Subdirectory installs drop `.git`, making `hermes plugins update` impossible for any plugin
+   that lives below a repo root.
+
+If either is fixed, the corresponding workaround here becomes unnecessary.
 
 ## License
 
