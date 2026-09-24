@@ -2,3 +2,4 @@ name: openai-codex
 kind: model-provider
 version: 1.1.0
 description: OpenAI Codex (ChatGPT Plus) — with model list for picker
+author: fabzter
